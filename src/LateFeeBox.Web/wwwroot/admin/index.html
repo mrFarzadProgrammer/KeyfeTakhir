@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123f39">
+  <title>کیف‌تاخیر | پنل مدیریت صندوق</title>
+  <link rel="icon" type="image/svg+xml" href="/admin/assets/favicon.svg">
+  <link rel="stylesheet" href="/admin/styles.css?v=11">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <main id="loginView" class="login-shell">
+    <div class="login-orb login-orb-one"></div>
+    <div class="login-orb login-orb-two"></div>
+    <section class="login-card">
+      <div class="login-brand">
+        <img src="/admin/assets/logo.svg" alt="لوگوی کیف‌تاخیر" width="82" height="82">
+        <div>
+          <span class="brand-kicker">سامانه هوشمند مدیریت جریمه</span>
+          <h1>کیف‌تاخیر</h1>
+          <p>مدیریت بدهی، پرداخت و صندوق گروه بله</p>
+        </div>
+      </div>
+      <form id="loginForm" class="stack login-form">
+        <label>
+          <span>نام کاربری</span>
+          <input id="loginUsername" autocomplete="username" inputmode="text" required placeholder="نام کاربری مدیر">
+        </label>
+        <label>
+          <span>رمز عبور</span>
+          <input id="loginPassword" type="password" autocomplete="current-password" required placeholder="رمز عبور">
+        </label>
+        <button class="primary wide" type="submit">
+          <span>ورود به پنل</span>
+          <span aria-hidden="true">←</span>
+        </button>
+      </form>
+      <div class="login-footnote"><span class="status-dot"></span> ارتباط امن با بات بله و ذخیره‌سازی محلی</div>
+    </section>
+  </main>
+
+  <div id="appView" class="app-shell" hidden>
+    <button id="sidebarBackdrop" class="sidebar-backdrop" aria-label="بستن منو" hidden></button>
+
+    <aside id="sidebar" class="sidebar">
+      <div class="sidebar-brand">
+        <img src="/admin/assets/logo.svg" alt="" width="52" height="52">
+        <div>
+          <strong>کیف‌تاخیر</strong>
+          <small>صندوق هوشمند جریمه</small>
+        </div>
+      </div>
+
+      <div class="group-card">
+        <div class="group-avatar">ک</div>
+        <div>
+          <small>مدیریت فعال</small>
+          <strong>صندوق گروه بله</strong>
+        </div>
+        <span class="online-dot" title="آنلاین"></span>
+      </div>
+
+      <nav id="nav" aria-label="منوی اصلی">
+        <button data-page="dashboard" class="active"><span class="nav-icon">⌂</span><span>داشبورد</span></button>
+        <button data-page="members"><span class="nav-icon">👥</span><span>اعضا و بدهی‌ها</span></button>
+        <button data-page="observed"><span class="nav-icon">◎</span><span>کاربران دیده‌شده</span></button>
+        <button data-page="fund"><span class="nav-icon">◈</span><span>گردش صندوق</span></button>
+        <button data-page="payments"><span class="nav-icon">▣</span><span>پرداخت‌ها</span></button>
+        <button data-page="settings"><span class="nav-icon">⚙</span><span>تنظیمات</span></button>
+      </nav>
+
+      <div class="sidebar-tip">
+        <span class="tip-icon">💡</span>
+        <div>
+          <strong>صورت‌حساب خودکار</strong>
+          <small>کاربر با پیام «صورتحساب» فاکتور خودش را دریافت می‌کند.</small>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="admin-chip">
+          <span class="admin-avatar">م</span>
+          <div><small>مدیر سامانه</small><strong id="currentAdmin"></strong></div>
+        </div>
+        <button id="logoutButton" class="icon-button danger-soft" title="خروج" aria-label="خروج">↪</button>
+      </div>
+    </aside>
+
+    <section class="content">
+      <header class="topbar">
+        <div class="topbar-title">
+          <button id="menuButton" class="menu-button" aria-label="باز کردن منو">☰</button>
+          <div>
+            <p class="eyebrow">نمای کلی عملکرد صندوق</p>
+            <h2 id="pageTitle">داشبورد</h2>
+            <p id="pageSubtitle">وضعیت لحظه‌ای اعضا، بدهی‌ها و پرداخت‌ها</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div class="connection-pill"><span class="status-dot"></span><span>بات متصل است</span></div>
+          <button id="refreshButton" class="ghost refresh-button"><span>به‌روزرسانی</span><span aria-hidden="true">↻</span></button>
+        </div>
+      </header>
+
+      <section id="page-dashboard" class="page active">
+        <div class="hero-grid">
+          <article class="hero-panel">
+            <div class="hero-copy">
+              <span class="hero-label">کیف‌تاخیر، ساده و شفاف</span>
+              <h3>مدیریت جریمه‌ها بدون پیگیری دستی</h3>
+              <p>اعضا بدهی خود را در بله می‌بینند، فاکتور می‌گیرند و پس از پرداخت، بدهی و موجودی صندوق خودکار اصلاح می‌شود.</p>
+              <div class="hero-actions">
+                <button class="primary quick-nav" data-target="members">ثبت جریمه جدید</button>
+                <button class="soft quick-nav" data-target="payments">مشاهده پرداخت‌ها</button>
+              </div>
+            </div>
+            <div class="hero-visual" aria-hidden="true">
+              <img src="/admin/assets/logo.svg" alt="" width="116" height="116">
+              <span class="floating-coin coin-one">ت</span>
+              <span class="floating-coin coin-two">✓</span>
+            </div>
+          </article>
+          <article class="smart-card">
+            <div class="smart-icon">⚡</div>
+            <div>
+              <small>قابلیت جدید</small>
+              <h3>صورتحساب شخصی در بله</h3>
+              <p>کاربر در خصوصی بات «صورتحساب» یا <code>/bill</code> می‌فرستد و فاکتور پرداخت دریافت می‌کند.</p>
+            </div>
+          </article>
+        </div>
+
+        <div id="dashboardCards" class="cards"></div>
+
+        <div class="dashboard-grid">
+          <article class="panel large-panel">
+            <div class="panel-head">
+              <div><span class="panel-kicker">وضعیت وصول</span><h3>بدهکاران فعال</h3><p>بیشترین بدهی‌های باز اعضای فعال</p></div>
+              <button class="text-button quick-nav" data-target="members">مشاهده همه ←</button>
+            </div>
+            <div class="table-wrap dashboard-table"><table><thead><tr><th>عضو</th><th>شناسه بله</th><th>بدهی</th><th>وضعیت</th></tr></thead><tbody id="dashboardDebtorsBody"></tbody></table></div>
+          </article>
+
+          <article class="panel command-panel">
+            <div class="panel-head"><div><span class="panel-kicker">راهنمای سریع</span><h3>فرمان‌های کاربردی</h3></div></div>
+            <div class="command-list">
+              <div><span class="command-icon">📄</span><div><code>/bill</code><small>دریافت صورت‌حساب و فاکتور شخصی</small></div></div>
+              <div><span class="command-icon">📊</span><div><code>/status</code><small>گزارش بدهی‌های گروه برای مدیر</small></div></div>
+              <div><span class="command-icon">💰</span><div><code>/fund</code><small>نمایش موجودی و گردش صندوق</small></div></div>
+              <div><span class="command-icon">👥</span><div><code>/registermembers</code><small>دعوت اعضا برای ثبت خودکار</small></div></div>
+            </div>
+          </article>
+        </div>
+
+        <article class="panel recent-panel">
+          <div class="panel-head">
+            <div><span class="panel-kicker">آخرین فعالیت‌ها</span><h3>پرداخت‌های اخیر</h3><p>جدیدترین فاکتورها و وضعیت تسویه</p></div>
+            <button class="text-button quick-nav" data-target="payments">مشاهده سوابق ←</button>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>عضو</th><th>مبلغ</th><th>وضعیت</th><th>زمان ایجاد</th></tr></thead><tbody id="recentPaymentsBody"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="page-members" class="page">
+        <div class="section-banner members-banner">
+          <div><span class="panel-kicker">مدیریت اعضا</span><h3>اعضا و بدهی‌ها</h3><p>ثبت جریمه، اصلاح بدهی و اتصال هر عضو به حساب بله</p></div>
+          <button id="addMemberButton" class="primary">＋ افزودن عضو</button>
+        </div>
+        <div class="panel">
+          <div class="table-tools">
+            <div class="search-box"><span>⌕</span><input id="memberSearch" placeholder="جست‌وجوی نام، شناسه یا نام کاربری..."></div>
+            <span id="memberCount" class="count-pill"></span>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>نام عضو</th><th>شناسه بله</th><th>نام کاربری</th><th>بدهی</th><th>وضعیت</th><th>عملیات</th></tr></thead><tbody id="membersBody"></tbody></table></div>
+        </div>
+      </section>
+
+      <section id="page-observed" class="page">
+        <div class="section-banner observed-banner">
+          <div><span class="panel-kicker">شناسایی خودکار</span><h3>کاربران دیده‌شده</h3><p>افرادی که از طریق پیام گروه شناسایی شده‌اند و هنوز عضو صندوق نیستند</p></div>
+          <span class="banner-icon">◎</span>
+        </div>
+        <div class="panel">
+          <div class="table-wrap"><table><thead><tr><th>نام در بله</th><th>شناسه</th><th>نام کاربری</th><th>آخرین مشاهده</th><th>عملیات</th></tr></thead><tbody id="observedBody"></tbody></table></div>
+        </div>
+      </section>
+
+      <section id="page-fund" class="page">
+        <div class="section-banner fund-banner">
+          <div><span class="panel-kicker">کنترل مالی</span><h3>گردش صندوق</h3><p>تنظیم موجودی، ثبت ورودی و مدیریت هزینه‌ها</p></div>
+          <span class="banner-icon">◈</span>
+        </div>
+        <div class="split">
+          <div class="panel form-panel">
+            <div class="form-icon">◎</div><h3>تنظیم موجودی فعلی</h3><p>موجودی واقعی صندوق را ثبت یا اصلاح کنید.</p>
+            <form id="setFundForm" class="stack compact">
+              <label><span>موجودی فعلی</span><input id="fundBalanceInput" type="number" step="1" required></label>
+              <label><span>توضیح</span><input id="fundBalanceDescription" maxlength="300" placeholder="مثلاً موجودی آغاز دوره"></label>
+              <button class="primary" type="submit">ثبت موجودی</button>
+            </form>
+          </div>
+          <div class="panel form-panel accent-form">
+            <div class="form-icon">↕</div><h3>ورودی یا هزینه جدید</h3><p>برای هزینه، مبلغ را به‌صورت منفی وارد کنید.</p>
+            <form id="adjustFundForm" class="stack compact">
+              <label><span>مبلغ تغییر</span><input id="fundAdjustInput" type="number" step="1" required></label>
+              <label><span>توضیح</span><input id="fundAdjustDescription" maxlength="300" required placeholder="شرح گردش صندوق"></label>
+              <button class="secondary" type="submit">ثبت گردش</button>
+            </form>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><div><span class="panel-kicker">دفتر صندوق</span><h3>آخرین گردش‌ها</h3></div></div>
+          <div class="table-wrap"><table><thead><tr><th>تاریخ</th><th>نوع</th><th>شرح</th><th>مبلغ</th></tr></thead><tbody id="fundEntriesBody"></tbody></table></div>
+        </div>
+      </section>
+
+      <section id="page-payments" class="page">
+        <div class="section-banner payment-banner">
+          <div><span class="panel-kicker">تسویه و وصول</span><h3>پرداخت‌ها</h3><p>سوابق فاکتورها، وضعیت پرداخت و شناسه تراکنش بله</p></div>
+          <span class="banner-icon">▣</span>
+        </div>
+        <div class="panel">
+          <div class="table-wrap"><table><thead><tr><th>عضو</th><th>مبلغ</th><th>وضعیت</th><th>ایجاد</th><th>پرداخت</th><th>شناسه تراکنش</th></tr></thead><tbody id="paymentsBody"></tbody></table></div>
+        </div>
+      </section>
+
+      <section id="page-settings" class="page">
+        <div class="section-banner settings-banner">
+          <div><span class="panel-kicker">پیکربندی سامانه</span><h3>تنظیمات</h3><p>وضعیت ارتباط بات و امنیت حساب مدیریت</p></div>
+          <span class="banner-icon">⚙</span>
+        </div>
+        <div class="split">
+          <div class="panel settings-card">
+            <div class="settings-status"><span class="status-dot"></span><strong>Long Polling فعال</strong></div>
+            <h3>ارتباط بات با بله</h3>
+            <p class="muted">بات بدون دامنه عمومی، Tunnel و Webhook پیام‌ها و پرداخت‌ها را دریافت می‌کند.</p>
+            <div class="setting-rows">
+              <div><span>حالت اتصال</span><strong>Long Polling</strong></div>
+              <div><span>Webhook</span><strong class="success-text">غیرفعال</strong></div>
+              <div><span>فرمان ثبت اعضا</span><code>/registermembers</code></div>
+              <div><span>فرمان صورت‌حساب</span><code>/bill</code></div>
+            </div>
+          </div>
+          <div class="panel form-panel">
+            <div class="form-icon">🔒</div><h3>تغییر رمز مدیر</h3><p>رمز جدید باید حداقل ۱۲ کاراکتر داشته باشد.</p>
+            <form id="passwordForm" class="stack compact">
+              <label><span>رمز فعلی</span><input id="currentPassword" type="password" required></label>
+              <label><span>رمز جدید</span><input id="newPassword" type="password" minlength="12" required></label>
+              <button class="secondary" type="submit">تغییر رمز عبور</button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </section>
+  </div>
+
+  <dialog id="formDialog">
+    <form method="dialog" id="dialogForm" class="dialog-card">
+      <div class="dialog-head"><div><span class="panel-kicker">فرم مدیریت</span><h3 id="dialogTitle"></h3></div><button value="cancel" class="icon-button" aria-label="بستن">×</button></div>
+      <div id="dialogFields" class="stack compact"></div>
+      <div class="dialog-actions"><button value="cancel" class="ghost">انصراف</button><button id="dialogSubmit" value="default" class="primary">ثبت تغییرات</button></div>
+    </form>
+  </dialog>
+
+  <script src="/admin/app.js?v=11" defer></script>
+</body>
+</html>

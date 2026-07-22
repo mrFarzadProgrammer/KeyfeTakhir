@@ -1,0 +1,28 @@
+KeyfeTakhir v1.2.1 - release validation
+
+Completed in the delivery environment:
+- JavaScript syntax check: PASS
+- HTML/JavaScript DOM id matching: PASS (0 missing ids)
+- appsettings.json parse: PASS
+- PowerShell 5.1 ASCII compatibility check: PASS
+- C# source delimiter/string/comment balance check: PASS for all source files
+- Manual endpoint-to-frontend route review: PASS
+- Manual Bale command routing review: PASS
+- Fixed 200,000-toman reply penalty command review: PASS
+- Manual payment state transition review: PASS
+- Duplicate payment protection review: PASS
+- Open invoice expiration after debt, identity, or active-state changes: PASS
+- Long group report chunking below Bale message limits: PASS
+- Linux deployment Bash syntax check: PASS
+- Server Docker Compose YAML parse: PASS
+- Secure loopback-only server port binding review: PASS
+- `/fine200` amount conversion review: PASS (200,000 tomans = 2,000,000 rials)
+- `/fine200` stale invoice expiration review: PASS
+
+Not executable in the delivery environment:
+- dotnet publish
+- Docker image build
+- live Bale API calls
+- real wallet payment
+
+Use run.ps1 -Rebuild and TEST-GUIDE-FA.md on the target Windows/Docker Desktop machine for runtime acceptance.

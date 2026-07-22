@@ -1,0 +1,25 @@
+services:
+  late-fee-box:
+    image: latefeebox-stable:1.2.1
+    container_name: late-fee-box
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Storage__Path: /app/data/state.json
+      Bale__BotToken: ${BALE_BOT_TOKEN}
+      Bale__ProviderToken: ${BALE_PROVIDER_TOKEN}
+      Bale__BotUsername: ${BALE_BOT_USERNAME}
+      Bale__UseLongPolling: ${BALE_USE_LONG_POLLING:-true}
+      Bale__LongPollingTimeoutSeconds: ${BALE_LONG_POLLING_TIMEOUT_SECONDS:-25}
+      Bale__AdminUserIds__0: ${BALE_ADMIN_USER_ID}
+      Bale__AllowedGroupChatIds__0: ${BALE_GROUP_CHAT_ID}
+      InitialAdmin__Username: ${ADMIN_USERNAME:-admin}
+      InitialAdmin__Password: ${ADMIN_PASSWORD}
+    volumes:
+      - late_fee_box_stable_data:/app/data
+
+volumes:
+  late_fee_box_stable_data:
+    name: late_fee_box_stable_data

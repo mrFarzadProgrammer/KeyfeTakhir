@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">لوگوی کیف‌تاخیر</title>
+  <desc id="desc">کیف پول همراه ساعت و سکه</desc>
+  <defs>
+    <linearGradient id="bg" x1="18" y1="12" x2="112" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1F6A5E"/>
+      <stop offset="1" stop-color="#123F39"/>
+    </linearGradient>
+    <linearGradient id="coin" x1="64" y1="28" x2="98" y2="67" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F3C774"/>
+      <stop offset="1" stop-color="#D99A45"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="34" fill="url(#bg)"/>
+  <path d="M31 41.5c0-8 6.5-14.5 14.5-14.5h41c8 0 14.5 6.5 14.5 14.5v4.2H42.8c-6.5 0-11.8 5.3-11.8 11.8V41.5Z" fill="#F8F1E4" opacity=".94"/>
+  <rect x="24" y="44" width="82" height="58" rx="20" fill="#F8F1E4"/>
+  <rect x="76" y="61" width="36" height="25" rx="12.5" fill="#E97A5F"/>
+  <circle cx="92" cy="73.5" r="4" fill="#FFF8EF"/>
+  <circle cx="77" cy="43" r="20" fill="url(#coin)" stroke="#FFF1D4" stroke-width="4"/>
+  <circle cx="77" cy="43" r="12" fill="none" stroke="#123F39" stroke-width="3.5" opacity=".85"/>
+  <path d="M77 35v9l6 3.5" fill="none" stroke="#123F39" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M40 70h22" stroke="#1F6A5E" stroke-width="5" stroke-linecap="round" opacity=".72"/>
+  <path d="M40 83h14" stroke="#1F6A5E" stroke-width="5" stroke-linecap="round" opacity=".45"/>
+</svg>

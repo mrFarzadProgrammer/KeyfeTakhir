@@ -1,0 +1,18 @@
+KeyfeTakhir v1.2.1
+
+1. Copy your existing .env file into this folder.
+2. Run:
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 -Rebuild
+3. Open:
+   http://localhost:8080/admin/
+4. Run local health tests:
+   .\test.cmd
+5. Read TEST-GUIDE-FA.md for the complete Bale test checklist.
+
+Main Bale tests:
+- Group admin: /commands
+- Reply to a user: /addmember
+- Reply to a user: /fine200 (adds 200,000 tomans)
+- Group admin: /debtors
+- Group admin: /fund
+- Private member: /bill
