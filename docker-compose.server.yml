@@ -3,6 +3,10 @@ services:
     image: latefeebox-stable:1.3.4
     container_name: late-fee-box
     restart: unless-stopped
+    # Containers could not resolve tapi.bale.ai with the default bridge DNS.
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     ports:
       - "192.168.111.245:8081:8080"
     environment:
@@ -14,7 +18,6 @@ services:
       Bale__UseLongPolling: ${BALE_USE_LONG_POLLING:-true}
       Bale__LongPollingTimeoutSeconds: ${BALE_LONG_POLLING_TIMEOUT_SECONDS:-25}
       Bale__AdminUserIds__0: ${BALE_ADMIN_USER_ID}
-      Bale__AllowedGroupChatIds__0: ${BALE_GROUP_CHAT_ID}
       InitialAdmin__Username: ${ADMIN_USERNAME:-admin}
       InitialAdmin__Password: ${ADMIN_PASSWORD}
     volumes:
