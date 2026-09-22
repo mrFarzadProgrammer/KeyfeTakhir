@@ -18,6 +18,7 @@ public static class AdminEndpoints
 
         var admin = app.MapGroup("/api/admin").RequireAuthorization();
         admin.MapGet("/session", SessionAsync);
+        admin.MapGet("/groups", GroupsAsync);
         admin.MapGet("/dashboard", DashboardAsync);
         admin.MapGet("/members", MembersAsync);
         admin.MapGet("/observed-users", ObservedUsersAsync);
@@ -126,20 +127,47 @@ public static class AdminEndpoints
             : Results.BadRequest(new { message = "رمز عبور فعلی صحیح نیست." });
     }
 
+    private static async Task<IResult> GroupsAsync(JsonStore store, MoneyService money, CancellationToken cancellationToken)
+    {
+        var result = await store.ReadAsync(state => state.Groups
+            .Select(group => new
+            {
+                id = group.ChatId,
+                title = group.Title,
+                isActive = group.IsActive,
+                memberCount = state.Members.Count(x => x.GroupChatId == group.ChatId && x.IsActive),
+                fundBalance = money.ToDisplayUnits(state.FundEntries.Where(x => x.GroupChatId == group.ChatId).Sum(x => x.AmountRials))
+            })
+            .ToArray(), cancellationToken);
+        return Results.Ok(result);
+    }
+
+    private static async Task<long> ResolveGroupIdAsync(JsonStore store, long? groupId, CancellationToken cancellationToken)
+        => await store.ReadAsync(state =>
+        {
+            if (groupId.HasValue && state.Groups.Any(x => x.ChatId == groupId.Value))
+            {
+                return groupId.Value;
+            }
+            return state.Groups.FirstOrDefault(x => x.IsActive)?.ChatId ?? state.Groups.FirstOrDefault()?.ChatId ?? 0;
+        }, cancellationToken);
+
     private static async Task<IResult> DashboardAsync(
         JsonStore store,
         MoneyService money,
+        long? groupId,
         CancellationToken cancellationToken)
     {
+        var chatId = await ResolveGroupIdAsync(store, groupId, cancellationToken);
         var result = await store.ReadAsync(state =>
         {
-            var activeMembers = state.Members.Where(x => x.IsActive).ToArray();
-            var debts = DebtMap(state);
+            var activeMembers = state.Members.Where(x => x.IsActive && x.GroupChatId == chatId).ToArray();
+            var debts = DebtMap(state, chatId);
             var totalDebtRials = activeMembers.Sum(x => Math.Max(0, debts.GetValueOrDefault(x.Id)));
             var debtorCount = activeMembers.Count(x => debts.GetValueOrDefault(x.Id) > 0);
-            var fundBalanceRials = state.FundEntries.Sum(x => x.AmountRials);
-            var collectedRials = state.FundEntries.Where(x => x.Kind == FundEntryKind.Payment).Sum(x => x.AmountRials);
-            var paidCount = state.Payments.Count(x => x.Status == PaymentRequestStatus.Paid);
+            var fundBalanceRials = state.FundEntries.Where(x => x.GroupChatId == chatId).Sum(x => x.AmountRials);
+            var collectedRials = state.FundEntries.Where(x => x.GroupChatId == chatId && x.Kind == FundEntryKind.Payment).Sum(x => x.AmountRials);
+            var paidCount = state.Payments.Count(x => x.GroupChatId == chatId && x.Status == PaymentRequestStatus.Paid);
             return new
             {
                 activeMemberCount = activeMembers.Length,
@@ -158,12 +186,15 @@ public static class AdminEndpoints
     private static async Task<IResult> MembersAsync(
         JsonStore store,
         MoneyService money,
+        long? groupId,
         CancellationToken cancellationToken)
     {
+        var chatId = await ResolveGroupIdAsync(store, groupId, cancellationToken);
         var result = await store.ReadAsync(state =>
         {
-            var debts = DebtMap(state);
+            var debts = DebtMap(state, chatId);
             return state.Members
+                .Where(x => x.GroupChatId == chatId)
                 .OrderByDescending(x => x.IsActive)
                 .ThenBy(x => x.DisplayName)
                 .Select(x => new
@@ -202,9 +233,12 @@ public static class AdminEndpoints
     private static async Task<IResult> FundEntriesAsync(
         JsonStore store,
         MoneyService money,
+        long? groupId,
         CancellationToken cancellationToken)
     {
+        var chatId = await ResolveGroupIdAsync(store, groupId, cancellationToken);
         var result = await store.ReadAsync(state => state.FundEntries
+            .Where(x => x.GroupChatId == chatId)
             .OrderByDescending(x => x.CreatedAt)
             .Take(200)
             .Select(x => new
@@ -222,9 +256,12 @@ public static class AdminEndpoints
     private static async Task<IResult> PaymentsAsync(
         JsonStore store,
         MoneyService money,
+        long? groupId,
         CancellationToken cancellationToken)
     {
+        var chatId = await ResolveGroupIdAsync(store, groupId, cancellationToken);
         var result = await store.ReadAsync(state => state.Payments
+            .Where(x => x.GroupChatId == chatId)
             .OrderByDescending(x => x.CreatedAt)
             .Take(200)
             .Select(x => new
@@ -250,15 +287,17 @@ public static class AdminEndpoints
     {
         var validation = ValidateMemberRequest(request);
         if (validation is not null) return validation;
+        var chatId = await ResolveGroupIdAsync(store, request.GroupId, cancellationToken);
 
         var result = await store.WriteAsync(state =>
         {
-            if (request.BaleUserId.HasValue && state.Members.Any(x => x.BaleUserId == request.BaleUserId))
-                return (Success: false, Message: "این شناسه بله قبلاً برای عضو دیگری ثبت شده است.", Id: Guid.Empty);
+            if (request.BaleUserId.HasValue && state.Members.Any(x => x.BaleUserId == request.BaleUserId && x.GroupChatId == chatId))
+                return (Success: false, Message: "این شناسه بله قبلاً برای عضو دیگری در این گروه ثبت شده است.", Id: Guid.Empty);
 
             var member = new TeamMember
             {
                 DisplayName = request.DisplayName.Trim(),
+                GroupChatId = chatId,
                 BaleUserId = request.BaleUserId,
                 BaleUsername = NormalizeUsername(request.BaleUsername)
             };
@@ -284,7 +323,7 @@ public static class AdminEndpoints
         {
             var member = state.Members.FirstOrDefault(x => x.Id == id);
             if (member is null) return (Status: 404, Message: "عضو پیدا نشد.");
-            if (request.BaleUserId.HasValue && state.Members.Any(x => x.Id != id && x.BaleUserId == request.BaleUserId))
+            if (request.BaleUserId.HasValue && state.Members.Any(x => x.Id != id && x.GroupChatId == member.GroupChatId && x.BaleUserId == request.BaleUserId))
                 return (Status: 400, Message: "این شناسه بله قبلاً برای عضو دیگری ثبت شده است.");
 
             var baleIdentityChanged = member.BaleUserId != request.BaleUserId;
@@ -363,7 +402,8 @@ public static class AdminEndpoints
         var adminId = GetAdminId(httpContext);
         var result = await store.WriteAsync(state =>
         {
-            if (state.Members.All(x => x.Id != id)) return false;
+            var member = state.Members.FirstOrDefault(x => x.Id == id);
+            if (member is null) return false;
             var current = state.DebtEntries.Where(x => x.TeamMemberId == id).Sum(x => x.AmountRials);
             var target = money.ToRials(request.Amount);
             var delta = setCurrent ? target - current : target;
@@ -372,6 +412,7 @@ public static class AdminEndpoints
                 state.DebtEntries.Add(new DebtLedgerEntry
                 {
                     TeamMemberId = id,
+                    GroupChatId = member.GroupChatId,
                     AmountRials = delta,
                     Kind = setCurrent ? DebtEntryKind.ManualAdjustment : DebtEntryKind.Penalty,
                     Description = request.Description.Trim(),
@@ -402,6 +443,7 @@ public static class AdminEndpoints
             state.Members.Add(new TeamMember
             {
                 DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? observed.DisplayName : request.DisplayName.Trim(),
+                GroupChatId = state.Groups.FirstOrDefault(x => x.IsActive)?.ChatId ?? state.Groups.FirstOrDefault()?.ChatId ?? 0,
                 BaleUserId = observed.BaleUserId,
                 BaleUsername = observed.Username
             });
@@ -425,17 +467,19 @@ public static class AdminEndpoints
     {
         if (request.Amount < 0) return Results.BadRequest(new { message = "موجودی نمی‌تواند منفی باشد." });
         var adminId = GetAdminId(httpContext);
+        var chatId = await ResolveGroupIdAsync(store, request.GroupId, cancellationToken);
         await store.WriteAsync(state =>
         {
-            var current = state.FundEntries.Sum(x => x.AmountRials);
+            var current = state.FundEntries.Where(x => x.GroupChatId == chatId).Sum(x => x.AmountRials);
             var target = money.ToRials(request.Amount);
             var delta = target - current;
             if (delta != 0)
             {
                 state.FundEntries.Add(new FundLedgerEntry
                 {
+                    GroupChatId = chatId,
                     AmountRials = delta,
-                    Kind = state.FundEntries.Count == 0 ? FundEntryKind.OpeningBalance : FundEntryKind.ManualAdjustment,
+                    Kind = state.FundEntries.Any(x => x.GroupChatId == chatId) ? FundEntryKind.ManualAdjustment : FundEntryKind.OpeningBalance,
                     Description = string.IsNullOrWhiteSpace(request.Description) ? "تنظیم موجودی صندوق" : request.Description.Trim(),
                     CreatedByAdminId = adminId
                 });
@@ -455,8 +499,10 @@ public static class AdminEndpoints
         if (string.IsNullOrWhiteSpace(request.Description)) return Results.BadRequest(new { message = "توضیح الزامی است." });
         var adminId = GetAdminId(httpContext);
         var amountRials = money.ToRials(request.Amount);
+        var chatId = await ResolveGroupIdAsync(store, request.GroupId, cancellationToken);
         await store.WriteAsync(state => state.FundEntries.Add(new FundLedgerEntry
         {
+            GroupChatId = chatId,
             AmountRials = amountRials,
             Kind = amountRials < 0 ? FundEntryKind.Expense : FundEntryKind.ManualAdjustment,
             Description = request.Description.Trim(),
@@ -485,8 +531,9 @@ public static class AdminEndpoints
         }
     }
 
-    private static Dictionary<Guid, long> DebtMap(AppState state)
+    private static Dictionary<Guid, long> DebtMap(AppState state, long groupChatId)
         => state.DebtEntries
+            .Where(x => x.GroupChatId == groupChatId)
             .GroupBy(x => x.TeamMemberId)
             .ToDictionary(x => x.Key, x => x.Sum(y => y.AmountRials));
 

@@ -6,7 +6,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 
-$ImageTag = 'latefeebox-stable:1.2.1'
+$ImageTag = 'latefeebox-stable:1.3.4'
 $SdkImage = 'mcr.microsoft.com/dotnet/sdk:10.0'
 $RuntimeImage = 'mcr.microsoft.com/dotnet/aspnet:10.0'
 

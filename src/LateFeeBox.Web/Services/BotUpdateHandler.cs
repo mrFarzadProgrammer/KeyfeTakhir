@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using LateFeeBox.Web.Data;
@@ -15,9 +16,11 @@ public sealed class BotUpdateHandler(
     IOptions<BaleOptions> options,
     ILogger<BotUpdateHandler> logger)
 {
+    private static readonly TimeSpan AdminCacheLifetime = TimeSpan.FromMinutes(5);
+
     private readonly BaleOptions _options = options.Value;
     private readonly HashSet<long> _adminIds = options.Value.AdminUserIds.ToHashSet();
-    private readonly HashSet<long> _allowedGroups = options.Value.AllowedGroupChatIds.ToHashSet();
+    private readonly ConcurrentDictionary<(long ChatId, long UserId), DateTime> _groupAdminCache = new();
 
     public async Task HandleAsync(BaleUpdate update, CancellationToken cancellationToken)
     {
@@ -29,6 +32,15 @@ public sealed class BotUpdateHandler(
 
         var message = update.Message ?? update.EditedMessage;
         if (message is null) return;
+
+        var isGroupChat = IsGroupChat(message.Chat);
+
+        // The bot only receives group updates for chats it is a member of, so an
+        // unknown group means the bot was added without the panel seeing it happen.
+        if (isGroupChat)
+        {
+            await EnsureGroupRegisteredAsync(message, cancellationToken);
+        }
 
         if (message.From is { IsBot: false } sender)
         {
@@ -45,16 +57,23 @@ public sealed class BotUpdateHandler(
             foreach (var user in message.NewChatMembers.Where(x => !x.IsBot))
             {
                 await ObserveUserAsync(user, message.Chat.Id, cancellationToken);
-                if (_allowedGroups.Contains(message.Chat.Id))
+                if (isGroupChat)
                 {
-                    await UpsertMemberAsync(user, cancellationToken);
+                    await UpsertMemberAsync(user, message.Chat.Id, cancellationToken);
                 }
             }
         }
 
-        if (message.LeftChatMember is { IsBot: false } leftUser && _allowedGroups.Contains(message.Chat.Id))
+        if (message.LeftChatMember is not null && isGroupChat)
         {
-            await DeactivateMemberAsync(leftUser.Id, cancellationToken);
+            if (IsSelf(message.LeftChatMember))
+            {
+                await DeactivateGroupAsync(message.Chat.Id, cancellationToken);
+            }
+            else if (!message.LeftChatMember.IsBot)
+            {
+                await DeactivateMemberAsync(message.LeftChatMember.Id, message.Chat.Id, cancellationToken);
+            }
         }
 
         if (message.SuccessfulPayment is not null)
@@ -92,7 +111,8 @@ public sealed class BotUpdateHandler(
             return;
         }
 
-        if (!_allowedGroups.Contains(message.Chat.Id)) return;
+        if (!isGroupChat) return;
+        if (!await IsGroupActiveAsync(message.Chat.Id, cancellationToken)) return;
 
         if (IsAddMemberCommand(command))
         {
@@ -101,10 +121,24 @@ public sealed class BotUpdateHandler(
             return;
         }
 
+        if (IsRemoveMemberCommand(command))
+        {
+            if (!await EnsureAdminAsync(message, cancellationToken)) return;
+            await HandleRemoveMemberAsync(message, cancellationToken);
+            return;
+        }
+
         if (IsFine200Command(command))
         {
             if (!await EnsureAdminAsync(message, cancellationToken)) return;
             await HandleFine200Async(message, cancellationToken);
+            return;
+        }
+
+        if (IsFineAllCommand(command))
+        {
+            if (!await EnsureAdminAsync(message, cancellationToken)) return;
+            await HandleFineAllAsync(message, cancellationToken);
             return;
         }
 
@@ -130,7 +164,7 @@ public sealed class BotUpdateHandler(
 
         if (IsRegistrationCommand(command))
         {
-            var member = await UpsertMemberAsync(message.From, cancellationToken);
+            var member = await UpsertMemberAsync(message.From, message.Chat.Id, cancellationToken);
             await bale.SendMessageAsync(
                 message.Chat.Id,
                 $"✅ {member.DisplayName} به‌صورت خودکار به اعضای کیف‌تاخیر اضافه شد.",
@@ -153,17 +187,18 @@ public sealed class BotUpdateHandler(
             return;
         }
 
-        if (command is "/status" or "/وضعیت")
+        if (command is "/addobserved" or "/ثبتهمه")
         {
             if (!await EnsureAdminAsync(message, cancellationToken)) return;
-            await SendStatusAsync(message.Chat.Id, message.MessageId, cancellationToken);
+            await AddObservedMembersAsync(message, cancellationToken);
             return;
         }
 
         if (command is "/fund" or "/صندوق")
         {
-            if (!await EnsureAdminAsync(message, cancellationToken)) return;
-            await SendFundAsync(message.Chat.Id, message.MessageId, cancellationToken);
+            // Every member may see the fund balance; the detailed breakdown is admin-only.
+            var isAdmin = await IsGroupAdminAsync(message, quiet: true, cancellationToken);
+            await SendFundAsync(message.Chat.Id, message.MessageId, isAdmin, cancellationToken);
             return;
         }
 
@@ -178,6 +213,112 @@ public sealed class BotUpdateHandler(
             await HandleAdminDebtRequestAsync(message, cancellationToken);
         }
     }
+
+    private bool IsSelf(BaleUser user)
+    {
+        if (!user.IsBot) return false;
+        var username = _options.BotUsername.Trim().TrimStart('@');
+        return !string.IsNullOrWhiteSpace(username) &&
+               string.Equals(user.Username?.Trim().TrimStart('@'), username, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsGroupChat(BaleChat chat)
+        => string.Equals(chat.Type, "group", StringComparison.OrdinalIgnoreCase) ||
+           string.Equals(chat.Type, "supergroup", StringComparison.OrdinalIgnoreCase);
+
+    private async Task EnsureGroupRegisteredAsync(BaleMessage message, CancellationToken cancellationToken)
+    {
+        var registration = await store.WriteAsync(state =>
+        {
+            var group = state.Groups.FirstOrDefault(x => x.ChatId == message.Chat.Id);
+            if (group is null)
+            {
+                // Exactly two active groups are supported: the first one added becomes
+                // the main group and the second one the test group. Removing the bot
+                // frees the slot again.
+                var activeGroups = state.Groups.Count(x => x.IsActive && x.ChatId != 0);
+                if (activeGroups >= 2)
+                {
+                    return (Registered: false, Rejected: true);
+                }
+
+                var isMain = activeGroups == 0;
+                state.Groups.Add(new GroupInfo
+                {
+                    ChatId = message.Chat.Id,
+                    Title = isMain ? "گروه اصلی" : "گروه تست"
+                });
+                return (Registered: true, Rejected: false);
+            }
+
+            if (!group.IsActive)
+            {
+                // The bot was removed earlier and re-added; make the group usable again.
+                group.IsActive = true;
+                return (Registered: true, Rejected: false);
+            }
+
+            return (Registered: false, Rejected: false);
+        }, cancellationToken);
+
+        if (registration.Rejected)
+        {
+            try
+            {
+                await bale.SendMessageAsync(
+                    message.Chat.Id,
+                    "⚠️ کیف‌تاخیر فقط در دو گروه (اصلی و تست) فعال می‌شود و ظرفیت آن پر است.",
+                    message.MessageId,
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception ex) when (ex is BaleApiException or HttpRequestException or TaskCanceledException)
+            {
+                logger.LogWarning(ex, "Could not send the group limit message for {ChatId}.", message.Chat.Id);
+            }
+            return;
+        }
+
+        if (registration.Registered)
+        {
+            _groupAdminCache.Clear();
+            try
+            {
+                await bale.SendMessageAsync(
+                    message.Chat.Id,
+                    "سلام 👋\nکیف‌تاخیر به این گروه اضافه شد و به‌عنوان «گروه اصلی» یا «گروه تست» ثبت شد.\nمدیران گروه می‌توانند با /commands راهنمای فرمان‌ها را ببینند؛ اعضا در گفت‌وگوی خصوصی بات صورت‌حساب خود را دریافت می‌کنند.",
+                    message.MessageId,
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception ex) when (ex is BaleApiException or HttpRequestException or TaskCanceledException)
+            {
+                logger.LogWarning(ex, "Could not send the group welcome message for {ChatId}.", message.Chat.Id);
+            }
+        }
+    }
+
+    private Task DeactivateGroupAsync(long chatId, CancellationToken cancellationToken)
+        => store.WriteAsync(state =>
+        {
+            var group = state.Groups.FirstOrDefault(x => x.ChatId == chatId);
+            if (group is null) return;
+            group.IsActive = false;
+            group.UpdatedAt = DateTime.UtcNow;
+
+            var memberIds = state.Members.Where(x => x.GroupChatId == chatId).Select(x => x.Id).ToHashSet();
+            foreach (var payment in state.Payments.Where(x =>
+                         x.GroupChatId == chatId &&
+                         memberIds.Contains(x.TeamMemberId) &&
+                         x.Status is PaymentRequestStatus.Pending or PaymentRequestStatus.Approved))
+            {
+                payment.Status = PaymentRequestStatus.Expired;
+                payment.RejectionReason = "بات از گروه حذف شد.";
+            }
+        }, cancellationToken);
+
+    private async Task<bool> IsGroupActiveAsync(long chatId, CancellationToken cancellationToken)
+        => await store.ReadAsync(
+            state => state.Groups.Any(x => x.ChatId == chatId && x.IsActive),
+            cancellationToken);
 
     private async Task RegisterFromPrivateAsync(BaleMessage message, CancellationToken cancellationToken)
     {
@@ -197,35 +338,33 @@ public sealed class BotUpdateHandler(
     {
         if (message.From is null) return null;
 
-        var groupId = _options.AllowedGroupChatIds.FirstOrDefault();
-        if (groupId == 0)
+        var groups = await store.ReadAsync(
+            state => state.Groups.Where(x => x.IsActive && x.ChatId != 0).Select(x => x.ChatId).ToArray(),
+            cancellationToken);
+        if (groups.Length == 0)
         {
-            await bale.SendMessageAsync(message.Chat.Id, "گروه مجاز در تنظیمات ثبت نشده است.", message.MessageId, cancellationToken: cancellationToken);
+            await bale.SendMessageAsync(message.Chat.Id, "هنوز گروه فعالی برای کیف‌تاخیر ثبت نشده است.", message.MessageId, cancellationToken: cancellationToken);
             return null;
         }
 
-        try
+        foreach (var groupId in groups)
         {
-            var membership = await bale.GetChatMemberAsync(groupId, message.From.Id, cancellationToken);
-            if (!IsCurrentGroupMember(membership))
+            try
             {
-                await DeactivateMemberAsync(message.From.Id, cancellationToken);
-                await bale.SendMessageAsync(message.Chat.Id, "این حساب در حال حاضر عضو گروه کیف‌تاخیر نیست و امکان دریافت صورت‌حساب ندارد.", message.MessageId, cancellationToken: cancellationToken);
-                return null;
-            }
+                var membership = await bale.GetChatMemberAsync(groupId, message.From.Id, cancellationToken);
+                if (!IsCurrentGroupMember(membership)) continue;
 
-            return await UpsertMemberAsync(message.From, cancellationToken);
+                return await UpsertMemberAsync(message.From, groupId, cancellationToken);
+            }
+            catch (Exception ex) when (ex is BaleApiException or HttpRequestException or TaskCanceledException)
+            {
+                logger.LogWarning(ex, "Could not validate Bale group membership for user {UserId} in group {ChatId}.", message.From.Id, groupId);
+            }
         }
-        catch (Exception ex) when (ex is BaleApiException or HttpRequestException or TaskCanceledException)
-        {
-            logger.LogWarning(ex, "Could not validate Bale group membership for user {UserId}.", message.From.Id);
-            await bale.SendMessageAsync(
-                message.Chat.Id,
-                "بررسی عضویت در گروه موقتاً ناموفق بود. چند لحظه بعد دوباره تلاش کنید.",
-                message.MessageId,
-                cancellationToken: cancellationToken);
-            return null;
-        }
+
+        await DeactivateMemberEverywhereAsync(message.From.Id, cancellationToken);
+        await bale.SendMessageAsync(message.Chat.Id, "این حساب در حال حاضر عضو هیچ گروه فعال کیف‌تاخیر نیست و امکان دریافت صورت‌حساب ندارد.", message.MessageId, cancellationToken: cancellationToken);
+        return null;
     }
 
     private async Task SendPrivateMenuAsync(long chatId, long replyToMessageId, CancellationToken cancellationToken)
@@ -292,12 +431,11 @@ public sealed class BotUpdateHandler(
             return;
         }
 
-        var announcementGroupId = _options.AllowedGroupChatIds.FirstOrDefault();
         await CreateAndSendInvoiceAsync(
             member,
             message.From.Id,
             message.Chat.Id,
-            announcementGroupId,
+            member.GroupChatId,
             message.MessageId,
             debt,
             cancellationToken);
@@ -363,7 +501,7 @@ public sealed class BotUpdateHandler(
             foreach (var administrator in admins.Where(x => !x.User.IsBot))
             {
                 await ObserveUserAsync(administrator.User, message.Chat.Id, cancellationToken);
-                await UpsertMemberAsync(administrator.User, cancellationToken);
+                await UpsertMemberAsync(administrator.User, message.Chat.Id, cancellationToken);
                 registered++;
             }
 
@@ -380,6 +518,49 @@ public sealed class BotUpdateHandler(
         }
     }
 
+    private async Task AddObservedMembersAsync(BaleMessage message, CancellationToken cancellationToken)
+    {
+        var names = await store.WriteAsync(state =>
+        {
+            // Bale has no API to list group members, so register everyone the bot has
+            // already seen writing in this group.
+            var candidates = state.ObservedUsers.Values
+                .Where(x => x.LastChatId == message.Chat.Id)
+                .ToArray();
+
+            var added = new List<string>();
+            foreach (var candidate in candidates)
+            {
+                if (state.Members.Any(x => x.BaleUserId == candidate.BaleUserId && x.GroupChatId == message.Chat.Id))
+                {
+                    continue;
+                }
+
+                var member = new TeamMember
+                {
+                    DisplayName = string.IsNullOrWhiteSpace(candidate.DisplayName) ? $"کاربر {candidate.BaleUserId}" : candidate.DisplayName,
+                    GroupChatId = message.Chat.Id,
+                    BaleUserId = candidate.BaleUserId,
+                    BaleUsername = candidate.Username
+                };
+                state.Members.Add(member);
+                added.Add(member.DisplayName);
+            }
+
+            return added;
+        }, cancellationToken);
+
+        var details = names.Count == 0
+            ? "همه کاربران دیده‌شده این گروه قبلاً عضو ثبت شده‌اند."
+            : string.Join("\n", names.Select((name, index) => $"{index + 1}. {name}"));
+
+        await SendLongMessageAsync(
+            message.Chat.Id,
+            $"✅ ثبت کاربران دیده‌شده انجام شد.\nتعداد افزوده‌شده: {names.Count:N0}\n\n{details}\n\nکاربرانی که هنوز در این گروه پیامی نداده‌اند، با Reply و /addmember یا /start در خصوصی بات اضافه می‌شوند.",
+            message.MessageId,
+            cancellationToken);
+    }
+
     private async Task HandleAddMemberAsync(BaleMessage message, CancellationToken cancellationToken)
     {
         var target = message.ReplyToMessage?.From;
@@ -393,7 +574,7 @@ public sealed class BotUpdateHandler(
             return;
         }
 
-        var member = await UpsertMemberAsync(target, cancellationToken);
+        var member = await UpsertMemberAsync(target, message.Chat.Id, cancellationToken);
         var debt = Math.Max(0, await GetDebtAsync(member.Id, cancellationToken));
         await bale.SendMessageAsync(
             message.Chat.Id,
@@ -416,12 +597,13 @@ public sealed class BotUpdateHandler(
         }
 
         const long fineRials = 2_000_000;
-        var member = await UpsertMemberAsync(target, cancellationToken);
+        var member = await UpsertMemberAsync(target, message.Chat.Id, cancellationToken);
         var newDebt = await store.WriteAsync(state =>
         {
             state.DebtEntries.Add(new DebtLedgerEntry
             {
                 TeamMemberId = member.Id,
+                GroupChatId = message.Chat.Id,
                 AmountRials = fineRials,
                 Kind = DebtEntryKind.Penalty,
                 Description = "جریمه ثابت ۲۰۰,۰۰۰ تومانی ثبت‌شده توسط مدیر در گروه"
@@ -447,16 +629,91 @@ public sealed class BotUpdateHandler(
             cancellationToken: cancellationToken);
     }
 
+    private async Task HandleFineAllAsync(BaleMessage message, CancellationToken cancellationToken)
+    {
+        var amountTomans = ParseAmountArgument(message.Text);
+        if (amountTomans is null || amountTomans <= 0)
+        {
+            await bale.SendMessageAsync(
+                message.Chat.Id,
+                "شکل درست فرمان:\n/fineall 50000\nیعنی ۵۰,۰۰۰ تومان به همه اعضای فعال این گروه اضافه می‌شود.",
+                message.MessageId,
+                cancellationToken: cancellationToken);
+            return;
+        }
+
+        var amountRials = money.ToRials(amountTomans.Value);
+        var result = await store.WriteAsync(state =>
+        {
+            var members = state.Members.Where(x => x.GroupChatId == message.Chat.Id && x.IsActive).ToArray();
+            foreach (var member in members)
+            {
+                state.DebtEntries.Add(new DebtLedgerEntry
+                {
+                    TeamMemberId = member.Id,
+                    GroupChatId = message.Chat.Id,
+                    AmountRials = amountRials,
+                    Kind = DebtEntryKind.Penalty,
+                    Description = "جریمه گروهی ثبت‌شده توسط مدیر در گروه"
+                });
+
+                foreach (var payment in state.Payments.Where(x =>
+                             x.TeamMemberId == member.Id &&
+                             x.Status is PaymentRequestStatus.Pending or PaymentRequestStatus.Approved))
+                {
+                    payment.Status = PaymentRequestStatus.Expired;
+                    payment.RejectionReason = "مبلغ بدهی پس از صدور فاکتور تغییر کرد.";
+                }
+            }
+
+            var totalDebt = state.DebtEntries
+                .Where(x => x.GroupChatId == message.Chat.Id)
+                .Sum(x => x.AmountRials);
+            return (Count: members.Length, TotalDebt: Math.Max(0, totalDebt));
+        }, cancellationToken);
+
+        await bale.SendMessageAsync(
+            message.Chat.Id,
+            result.Count == 0
+                ? "هیچ عضو فعالی برای این گروه ثبت نشده است.\nاعضا با زدن دکمه ثبت عضویت یا /start در خصوصی بات اضافه می‌شوند."
+                : $"✅ جریمه گروهی ثبت شد.\nمبلغ برای هر عضو: {money.Format(amountRials)}\nتعداد اعضا: {result.Count:N0}\nجمع کل بدهی گروه: {money.Format(result.TotalDebt)}\n\nهر عضو می‌تواند در خصوصی بات با /bill صورت‌حساب و کارت پرداخت خود را دریافت کند.",
+            message.MessageId,
+            cancellationToken: cancellationToken);
+    }
+
+    private static long? ParseAmountArgument(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var tokens = text
+            .Replace('٬', ' ')
+            .Replace(',', ' ')
+            .Trim()
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (tokens.Length < 2) return null;
+
+        var digits = new string(tokens[1].Select(ToLatinDigit).ToArray());
+        return long.TryParse(digits, out var amount) ? amount : null;
+    }
+
+    private static char ToLatinDigit(char c) => c switch
+    {
+        >= '۰' and <= '۹' => (char)('0' + c - '۰'),
+        >= '٠' and <= '٩' => (char)('0' + c - '٠'),
+        _ => c
+    };
+
     private async Task SendDebtorsAsync(long chatId, long replyToMessageId, CancellationToken cancellationToken)
     {
         var data = await store.ReadAsync(state =>
         {
+            var groupTitle = state.Groups.FirstOrDefault(x => x.ChatId == chatId)?.Title;
             var debtMap = state.DebtEntries
+                .Where(x => x.GroupChatId == chatId)
                 .GroupBy(x => x.TeamMemberId)
                 .ToDictionary(x => x.Key, x => Math.Max(0, x.Sum(y => y.AmountRials)));
 
             var debtors = state.Members
-                .Where(x => x.IsActive && debtMap.GetValueOrDefault(x.Id) > 0)
+                .Where(x => x.IsActive && x.GroupChatId == chatId && debtMap.GetValueOrDefault(x.Id) > 0)
                 .OrderByDescending(x => debtMap.GetValueOrDefault(x.Id))
                 .Select(x => new
                 {
@@ -467,6 +724,7 @@ public sealed class BotUpdateHandler(
 
             return new
             {
+                GroupTitle = groupTitle,
                 Count = debtors.Length,
                 Total = debtors.Sum(x => x.Debt),
                 Lines = debtors.Select((x, index) => $"{index + 1}. {x.DisplayName}: {money.Format(x.Debt)}").ToArray()
@@ -474,12 +732,12 @@ public sealed class BotUpdateHandler(
         }, cancellationToken);
 
         var details = data.Lines.Length == 0
-            ? "هیچ بدهکار فعالی وجود ندارد."
+            ? "هیچ بدهکار فعلی وجود ندارد."
             : string.Join("\n", data.Lines);
 
         await SendLongMessageAsync(
             chatId,
-            $"📋 فهرست بدهکاران کیف‌تاخیر\nتعداد بدهکاران: {data.Count:N0}\nجمع کل بدهی: {money.Format(data.Total)}\n\n{details}",
+            $"📋 فهرست بدهکاران کیف‌تاخیر{GroupSuffix(data.GroupTitle)}\nتعداد بدهکاران: {data.Count:N0}\nجمع کل بدهی: {money.Format(data.Total)}\n\n{details}",
             replyToMessageId,
             cancellationToken);
     }
@@ -488,59 +746,67 @@ public sealed class BotUpdateHandler(
     {
         await bale.SendMessageAsync(
             chatId,
-            "راهنمای مدیر کیف‌تاخیر 👇\n\n" +
-            "👤 ثبت عضو با Reply: /addmember یا «ثبت عضو»\n" +
-            "💸 ثبت جریمه ۲۰۰,۰۰۰ تومانی با Reply: /fine200\n" +
-            "👥 دعوت همه اعضا برای ثبت: /registermembers\n" +
-            "🔄 همگام‌سازی مدیران گروه: /syncmembers\n" +
-            "📋 فهرست بدهکاران: /debtors\n" +
-            "📊 گزارش کلی اعضا و بدهی: /status\n" +
-            "💰 گزارش موجودی صندوق: /fund\n" +
-            "💳 نمایش بدهی شخص با Reply: /debt\n\n" +
-            "اعضا در خصوصی بات با /bill یا /pay صورت‌حساب و کارت پرداخت خود را دریافت می‌کنند.",
+            "📖 راهنمای کامل کیف‌تاخیر 👇\n\n" +
+            "— فرمان‌های مدیر گروه (نیاز به دسترسی مدیر) —\n\n" +
+            "👤 ثبت عضو:\nروی پیام او Reply بزنید و /addmember یا «ثبت عضو» بفرستید.\n\n" +
+            "🗑 حذف عضو:\nروی پیام او Reply بزنید و /removemember یا «حذف عضو» بفرستید.\n\n" +
+            "💸 ثبت جریمه ثابت ۲۰۰,۰۰۰ تومانی برای یک نفر:\nReply + /fine200\n\n" +
+            "💸 جریمه گروهی (مثلاً سهم اشتراک مشترک):\n/fineall مبلغ — مثال: /fineall 50000 یعنی ۵۰,۰۰۰ تومان به همه اعضای فعال اضافه می‌شود. معادل فارسی: «جریمه همه ۵۰۰۰۰».\n\n" +
+            "💳 بدهی یک نفر + صدور فاکتور:\nReply + /debt\n\n" +
+            "📋 فهرست بدهکاران و جمع بدهی:\n/debtors یا «لیست بدهکاران»\n\n" +
+            "👥 ثبت همه کاربرانی که در گروه پیام داده‌اند:\n/addobserved\n\n" +
+            "🔄 ثبت مدیران گروه:\n/syncmembers\n\n" +
+            "📨 ارسال دکمه ثبت عضویت برای همه اعضا:\n/registermembers\n\n" +
+            "— فرمان‌های همه اعضا —\n\n" +
+            "💰 موجودی صندوق گروه:\n/fund — برای مدیران همراه با تفکیک گردش (پرداخت جریمه‌ها، موجودی اولیه، هزینه‌ها و...).\n\n" +
+            "— در گفت‌وگوی خصوصی بات —\n\n" +
+            "📄 صورت‌حساب و کارت پرداخت بدهی خودتان: /bill یا /pay یا پیام «صورتحساب من»\n" +
+            "✅ ثبت یا به‌روزرسانی عضویت: /start\n" +
+            "ℹ️ راهنمای عضو: /help\n\n" +
+            "نکته: فرمان‌های مدیریتی فقط برای مدیران همین گروه فعال است و اعداد هر گروه کاملاً جدا محاسبه می‌شود.",
             replyToMessageId,
             cancellationToken: cancellationToken);
     }
 
-    private async Task SendStatusAsync(long chatId, long replyToMessageId, CancellationToken cancellationToken)
-    {
-        var data = await store.ReadAsync(state =>
-        {
-            var active = state.Members.Where(x => x.IsActive).ToArray();
-            var debtMap = state.DebtEntries.GroupBy(x => x.TeamMemberId).ToDictionary(x => x.Key, x => x.Sum(y => y.AmountRials));
-            var debtors = active.Where(x => debtMap.GetValueOrDefault(x.Id) > 0).ToArray();
-            var total = debtors.Sum(x => debtMap.GetValueOrDefault(x.Id));
-            var lines = debtors
-                .OrderByDescending(x => debtMap.GetValueOrDefault(x.Id))
-                .Select(x => $"• {x.DisplayName}: {money.Format(debtMap.GetValueOrDefault(x.Id))}")
-                .ToArray();
-            return new { Active = active.Length, DebtorCount = debtors.Length, Total = total, Lines = lines };
-        }, cancellationToken);
-
-        var details = data.Lines.Length == 0 ? "\nهیچ بدهی بازی وجود ندارد." : "\n\n" + string.Join("\n", data.Lines);
-        await SendLongMessageAsync(
-            chatId,
-            $"📊 وضعیت کیف‌تاخیر\nاعضای فعال: {data.Active:N0}\nافراد بدهکار: {data.DebtorCount:N0}\nکل بدهی باز: {money.Format(data.Total)}{details}",
-            replyToMessageId,
-            cancellationToken);
-    }
-
-    private async Task SendFundAsync(long chatId, long replyToMessageId, CancellationToken cancellationToken)
+    private async Task SendFundAsync(long chatId, long replyToMessageId, bool includeBreakdown, CancellationToken cancellationToken)
     {
         var data = await store.ReadAsync(state => new
         {
-            Balance = state.FundEntries.Sum(x => x.AmountRials),
-            Collected = state.FundEntries.Where(x => x.Kind == FundEntryKind.Payment).Sum(x => x.AmountRials),
-            Expenses = -state.FundEntries.Where(x => x.AmountRials < 0).Sum(x => x.AmountRials),
-            PaidCount = state.Payments.Count(x => x.Status == PaymentRequestStatus.Paid)
+            GroupTitle = state.Groups.FirstOrDefault(x => x.ChatId == chatId)?.Title,
+            Balance = state.FundEntries.Where(x => x.GroupChatId == chatId).Sum(x => x.AmountRials),
+            PaidCount = state.Payments.Count(x => x.GroupChatId == chatId && x.Status == PaymentRequestStatus.Paid),
+            Breakdown = state.FundEntries
+                .Where(x => x.GroupChatId == chatId)
+                .GroupBy(x => x.Kind)
+                .Select(g => (Kind: g.Key, Count: g.Count(), Sum: g.Sum(x => x.AmountRials)))
+                .ToArray()
         }, cancellationToken);
 
-        await bale.SendMessageAsync(
-            chatId,
-            $"💰 گزارش کیف‌تاخیر\nموجودی فعلی: {money.Format(data.Balance)}\nجمع جریمه‌های پرداخت‌شده: {money.Format(data.Collected)}\nجمع خروجی‌ها/هزینه‌ها: {money.Format(data.Expenses)}\nتعداد پرداخت موفق: {data.PaidCount:N0}",
-            replyToMessageId,
-            cancellationToken: cancellationToken);
+        var text = $"💰 گزارش کیف‌تاخیر{GroupSuffix(data.GroupTitle)}\nموجودی فعلی: {money.Format(data.Balance)}\nتعداد پرداخت موفق: {data.PaidCount:N0}";
+
+        if (includeBreakdown && data.Breakdown.Length > 0)
+        {
+            var lines = data.Breakdown
+                .OrderByDescending(x => x.Sum)
+                .Select(x => $"• {FundKindLabel(x.Kind)}: {money.Format(x.Sum)} ({x.Count:N0} مورد)");
+            text += "\n\nتفکیک گردش صندوق:\n" + string.Join("\n", lines);
+        }
+
+        await bale.SendMessageAsync(chatId, text, replyToMessageId, cancellationToken: cancellationToken);
     }
+
+    private static string FundKindLabel(FundEntryKind kind) => kind switch
+    {
+        FundEntryKind.Payment => "پرداخت جریمه اعضا",
+        FundEntryKind.OpeningBalance => "موجودی اولیه",
+        FundEntryKind.ManualAdjustment => "اصلاح دستی/واریز",
+        FundEntryKind.Expense => "هزینه/خروجی",
+        FundEntryKind.Refund => "بازپرداخت",
+        _ => kind.ToString()
+    };
+
+    private static string GroupSuffix(string? groupTitle)
+        => string.IsNullOrWhiteSpace(groupTitle) ? string.Empty : $" — {groupTitle}";
 
     private async Task SendLongMessageAsync(
         long chatId,
@@ -609,7 +875,7 @@ public sealed class BotUpdateHandler(
             return;
         }
 
-        var member = await UpsertMemberAsync(target, cancellationToken);
+        var member = await UpsertMemberAsync(target, message.Chat.Id, cancellationToken);
         var debt = await GetDebtAsync(member.Id, cancellationToken);
 
         if (debt <= 0)
@@ -778,6 +1044,7 @@ public sealed class BotUpdateHandler(
                 state.DebtEntries.Add(new DebtLedgerEntry
                 {
                     TeamMemberId = payment.TeamMemberId,
+                    GroupChatId = payment.GroupChatId,
                     AmountRials = -applied,
                     Kind = DebtEntryKind.Payment,
                     Description = "پرداخت جریمه از بله",
@@ -787,6 +1054,7 @@ public sealed class BotUpdateHandler(
 
             state.FundEntries.Add(new FundLedgerEntry
             {
+                GroupChatId = payment.GroupChatId,
                 AmountRials = payment.AmountRials,
                 Kind = FundEntryKind.Payment,
                 Description = overpayment > 0 ? "واریز جریمه از بله همراه مازاد پرداخت" : "واریز جریمه از بله",
@@ -796,7 +1064,7 @@ public sealed class BotUpdateHandler(
             var name = state.Members.FirstOrDefault(x => x.Id == payment.TeamMemberId)?.DisplayName
                        ?? message.From.DisplayName;
             var remainingDebt = Math.Max(0, currentDebt - applied);
-            var fundBalance = state.FundEntries.Sum(x => x.AmountRials);
+            var fundBalance = state.FundEntries.Where(x => x.GroupChatId == payment.GroupChatId).Sum(x => x.AmountRials);
 
             return (
                 Done: true,
@@ -868,16 +1136,17 @@ public sealed class BotUpdateHandler(
         }, cancellationToken);
     }
 
-    private Task<TeamMember> UpsertMemberAsync(BaleUser user, CancellationToken cancellationToken)
+    private Task<TeamMember> UpsertMemberAsync(BaleUser user, long groupChatId, CancellationToken cancellationToken)
         => store.WriteAsync(state =>
         {
             var name = string.IsNullOrWhiteSpace(user.DisplayName) ? $"کاربر {user.Id}" : user.DisplayName;
-            var member = state.Members.FirstOrDefault(x => x.BaleUserId == user.Id);
+            var member = state.Members.FirstOrDefault(x => x.BaleUserId == user.Id && x.GroupChatId == groupChatId);
             if (member is null)
             {
                 member = new TeamMember
                 {
                     DisplayName = name,
+                    GroupChatId = groupChatId,
                     BaleUserId = user.Id,
                     BaleUsername = NormalizeUsername(user.Username)
                 };
@@ -893,10 +1162,10 @@ public sealed class BotUpdateHandler(
             return member;
         }, cancellationToken);
 
-    private Task DeactivateMemberAsync(long baleUserId, CancellationToken cancellationToken)
+    private Task DeactivateMemberAsync(long baleUserId, long groupChatId, CancellationToken cancellationToken)
         => store.WriteAsync(state =>
         {
-            var member = state.Members.FirstOrDefault(x => x.BaleUserId == baleUserId);
+            var member = state.Members.FirstOrDefault(x => x.BaleUserId == baleUserId && x.GroupChatId == groupChatId);
             if (member is null) return;
             member.IsActive = false;
             member.UpdatedAt = DateTime.UtcNow;
@@ -908,11 +1177,57 @@ public sealed class BotUpdateHandler(
             }
         }, cancellationToken);
 
-    private async Task<bool> EnsureAdminAsync(BaleMessage message, CancellationToken cancellationToken)
+    private Task DeactivateMemberEverywhereAsync(long baleUserId, CancellationToken cancellationToken)
+        => store.WriteAsync(state =>
+        {
+            foreach (var member in state.Members.Where(x => x.BaleUserId == baleUserId))
+            {
+                member.IsActive = false;
+                member.UpdatedAt = DateTime.UtcNow;
+            }
+        }, cancellationToken);
+
+    private Task<bool> EnsureAdminAsync(BaleMessage message, CancellationToken cancellationToken)
+        => IsGroupAdminAsync(message, quiet: false, cancellationToken);
+
+    private async Task<bool> IsGroupAdminAsync(BaleMessage message, bool quiet, CancellationToken cancellationToken)
     {
-        if (message.From is not null && _adminIds.Contains(message.From.Id)) return true;
-        await bale.SendMessageAsync(message.Chat.Id, "این فرمان فقط برای مدیر کیف‌تاخیر فعال است.", message.MessageId, cancellationToken: cancellationToken);
-        return false;
+        if (message.From is null) return false;
+        if (_adminIds.Contains(message.From.Id)) return true;
+
+        var cacheKey = (message.Chat.Id, message.From.Id);
+        if (_groupAdminCache.TryGetValue(cacheKey, out var cachedAt) && DateTime.UtcNow - cachedAt < AdminCacheLifetime)
+        {
+            return true;
+        }
+
+        try
+        {
+            var admins = await bale.GetChatAdministratorsAsync(message.Chat.Id, cancellationToken);
+            var isAdmin = admins.Any(x => x.User.Id == message.From.Id &&
+                                           (string.Equals(x.Status, "administrator", StringComparison.OrdinalIgnoreCase) ||
+                                            string.Equals(x.Status, "creator", StringComparison.OrdinalIgnoreCase)));
+            if (!isAdmin)
+            {
+                if (!quiet)
+                {
+                    await bale.SendMessageAsync(message.Chat.Id, "این فرمان فقط برای مدیران همین گروه فعال است.", message.MessageId, cancellationToken: cancellationToken);
+                }
+                return false;
+            }
+
+            _groupAdminCache[cacheKey] = DateTime.UtcNow;
+            return true;
+        }
+        catch (Exception ex) when (ex is BaleApiException or HttpRequestException or TaskCanceledException)
+        {
+            logger.LogWarning(ex, "Could not fetch administrators of group {ChatId}.", message.Chat.Id);
+            if (!quiet)
+            {
+                await bale.SendMessageAsync(message.Chat.Id, "بررسی دسترسی مدیر موقتاً ناموفق بود. چند لحظه بعد دوباره تلاش کنید.", message.MessageId, cancellationToken: cancellationToken);
+            }
+            return false;
+        }
     }
 
     private static bool IsRegistrationCommand(string command)
@@ -952,6 +1267,63 @@ public sealed class BotUpdateHandler(
             "/fine200" or "/penalty200" or "/جریمه200" or "/جریمه_200" or
             "جریمه 200" or "جریمه ۲۰۰" or "جریمه 200000" or "جریمه ۲۰۰۰۰۰" or
             "جریمه دویست" or "دویست جریمه";
+    }
+
+    private static bool IsFineAllCommand(string command)
+    {
+        var normalized = command.Replace('‌', ' ').Replace("  ", " ").Trim();
+        var firstToken = normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+        return firstToken is "/fineall" or "/chargeall" or "/جریمههمه" or "/جریمه_همه" ||
+               normalized.StartsWith("جریمه همه", StringComparison.Ordinal) ||
+               normalized.StartsWith("همه جریمه", StringComparison.Ordinal);
+    }
+
+    private async Task HandleRemoveMemberAsync(BaleMessage message, CancellationToken cancellationToken)
+    {
+        var target = message.ReplyToMessage?.From;
+        if (target is null || target.IsBot)
+        {
+            await bale.SendMessageAsync(
+                message.Chat.Id,
+                "برای حذف عضو، روی یکی از پیام‌های او Reply بزنید و /removemember یا «حذف عضو» را ارسال کنید.",
+                message.MessageId,
+                cancellationToken: cancellationToken);
+            return;
+        }
+
+        var removed = await store.WriteAsync(state =>
+        {
+            var member = state.Members.FirstOrDefault(x => x.BaleUserId == target.Id && x.GroupChatId == message.Chat.Id);
+            if (member is null) return (Found: false, Name: string.Empty, Debt: 0L);
+
+            member.IsActive = false;
+            member.UpdatedAt = DateTime.UtcNow;
+            foreach (var payment in state.Payments.Where(x =>
+                         x.TeamMemberId == member.Id &&
+                         x.Status is PaymentRequestStatus.Pending or PaymentRequestStatus.Approved))
+            {
+                payment.Status = PaymentRequestStatus.Expired;
+                payment.RejectionReason = "عضو توسط مدیر از گروه حذف شد.";
+            }
+
+            return (Found: true, Name: member.DisplayName, Debt: Math.Max(0, state.DebtEntries.Where(x => x.TeamMemberId == member.Id).Sum(x => x.AmountRials)));
+        }, cancellationToken);
+
+        await bale.SendMessageAsync(
+            message.Chat.Id,
+            removed.Found
+                ? $"🗑 {removed.Name} از اعضای کیف‌تاخیر این گروه حذف شد.\nبدهی باز او: {money.Format(removed.Debt)}\n(برای بازگشت، دوباره با /addmember ثبت کنید)"
+                : "این کاربر در اعضای این گروه ثبت نشده است.",
+            message.MessageId,
+            cancellationToken: cancellationToken);
+    }
+
+    private static bool IsRemoveMemberCommand(string command)
+    {
+        var normalized = command.Replace('‌', ' ').Replace("  ", " ").Trim();
+        return normalized is
+            "/removemember" or "/deletemember" or "/حذفعضو" or "/حذف_عضو" or
+            "حذف عضو" or "حذفش کن";
     }
 
     private static bool IsDebtorsCommand(string command)

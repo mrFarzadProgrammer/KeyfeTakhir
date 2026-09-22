@@ -5,6 +5,8 @@ const state = {
   username: null,
   unit: 'تومان',
   page: 'dashboard',
+  groupId: null,
+  groups: [],
   members: [],
   payments: []
 };
@@ -142,17 +144,37 @@ function memberRow(member) {
   </tr>`;
 }
 
+function groupQuery() {
+  return state.groupId != null ? `?groupId=${state.groupId}` : '';
+}
+
+async function loadGroups() {
+  state.groups = await api('/api/admin/groups');
+  const selector = $('groupSelector');
+  selector.innerHTML = state.groups.length
+    ? state.groups.map((group) => `<option value="${group.id}" ${group.id === state.groupId ? 'selected' : ''}>${escapeHtml(group.title)}${group.isActive ? '' : ' (غیرفعال)'}</option>`).join('')
+    : '<option value="">هنوز گروهی ثبت نشده</option>';
+  const current = state.groups.find((group) => group.id === state.groupId) || state.groups[0];
+  state.groupId = current ? current.id : null;
+}
+
 async function init() {
   try {
     const session = await api('/api/admin/session');
     state.csrfToken = session.csrfToken;
     state.username = session.username;
     showApp();
+    await loadGroups();
     await navigate('dashboard');
   } catch {
     showLogin();
   }
 }
+
+$('groupSelector').addEventListener('change', async () => {
+  state.groupId = Number($('groupSelector').value);
+  await loadPage(state.page);
+});
 
 $('loginForm').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -241,9 +263,9 @@ async function loadPage(page) {
 
 async function loadDashboard() {
   const [dashboard, members, payments] = await Promise.all([
-    api('/api/admin/dashboard'),
-    api('/api/admin/members'),
-    api('/api/admin/payments')
+    api('/api/admin/dashboard' + groupQuery()),
+    api('/api/admin/members' + groupQuery()),
+    api('/api/admin/payments' + groupQuery())
   ]);
   state.unit = dashboard.unit;
   state.members = members;
@@ -275,7 +297,7 @@ async function loadDashboard() {
 }
 
 async function loadMembers() {
-  state.members = await api('/api/admin/members');
+  state.members = await api('/api/admin/members' + groupQuery());
   renderMembers();
 }
 
@@ -330,7 +352,7 @@ function openMemberDialog(member = null) {
         baleUsername: values.baleUsername || null
       };
       await api(member ? `/api/admin/members/${member.id}` : '/api/admin/members', {
-        method: member ? 'PUT' : 'POST', body
+        method: member ? 'PUT' : 'POST', body: { ...body, groupId: state.groupId }
       });
       showToast(member ? 'اطلاعات عضو ویرایش شد.' : 'عضو جدید اضافه شد.');
       await loadMembers();
@@ -348,7 +370,7 @@ function openAmountDialog(member, mode) {
     ],
     onSubmit: async (values) => {
       await api(`/api/admin/members/${member.id}/debt/${isSet ? 'set' : 'add'}`, {
-        method: 'POST', body: { amount: Number(values.amount), description: values.description }
+        method: 'POST', body: { amount: Number(values.amount), description: values.description, groupId: state.groupId }
       });
       showToast(isSet ? 'بدهی عضو اصلاح شد.' : 'جریمه با موفقیت ثبت شد.');
       await loadMembers();
@@ -384,7 +406,7 @@ $('observedBody').addEventListener('click', (event) => {
 });
 
 async function loadFund() {
-  const [dashboard, entries] = await Promise.all([api('/api/admin/dashboard'), api('/api/admin/fund/entries')]);
+  const [dashboard, entries] = await Promise.all([api('/api/admin/dashboard' + groupQuery()), api('/api/admin/fund/entries' + groupQuery())]);
   state.unit = dashboard.unit;
   $('fundBalanceInput').value = dashboard.fundBalance;
   $('fundEntriesBody').innerHTML = entries.length ? entries.map((entry) => `<tr>
@@ -398,7 +420,7 @@ $('setFundForm').addEventListener('submit', async (event) => {
   try {
     await api('/api/admin/fund/set-balance', {
       method: 'POST',
-      body: { amount: Number($('fundBalanceInput').value), description: $('fundBalanceDescription').value }
+      body: { amount: Number($('fundBalanceInput').value), description: $('fundBalanceDescription').value, groupId: state.groupId }
     });
     showToast('موجودی صندوق تنظیم شد.');
     await loadFund();
@@ -410,7 +432,7 @@ $('adjustFundForm').addEventListener('submit', async (event) => {
   try {
     await api('/api/admin/fund/adjust', {
       method: 'POST',
-      body: { amount: Number($('fundAdjustInput').value), description: $('fundAdjustDescription').value }
+      body: { amount: Number($('fundAdjustInput').value), description: $('fundAdjustDescription').value, groupId: state.groupId }
     });
     event.target.reset();
     showToast('گردش صندوق ثبت شد.');
@@ -419,7 +441,7 @@ $('adjustFundForm').addEventListener('submit', async (event) => {
 });
 
 async function loadPayments() {
-  state.payments = await api('/api/admin/payments');
+  state.payments = await api('/api/admin/payments' + groupQuery());
   $('paymentsBody').innerHTML = state.payments.length ? state.payments.map((payment) => `<tr>
     <td><div class="member-cell"><span class="member-avatar">${firstLetter(payment.memberName)}</span><strong>${escapeHtml(payment.memberName)}</strong></div></td>
     <td>${formatMoney(payment.amount)}</td><td>${statusBadge(payment.status)}</td><td>${formatDate(payment.createdAt)}</td>

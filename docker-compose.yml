@@ -1,6 +1,6 @@
 services:
   late-fee-box:
-    image: latefeebox-stable:1.2.1
+    image: latefeebox-stable:1.3.4
     container_name: late-fee-box
     restart: unless-stopped
     ports:

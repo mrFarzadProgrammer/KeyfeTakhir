@@ -1,3 +1,34 @@
+# 1.3.4
+
+- Removed `/status` (redundant with `/debtors`).
+- Rewrote `/commands` into a complete guide of every command: admin commands (add/remove member, fine200, fineall, debt, debtors, addobserved, syncmembers, registermembers), member commands (/fund), and private-chat commands (/bill, /pay, /start, /help), each with a one-line description of what it does.
+
+# 1.3.3
+
+- Added `/removemember` (aliases `/deletemember`, `حذف عضو`, `حذفش کن`) for group administrators: deactivates the replied member of that group and expires their open invoices.
+- `/fund` is now available to all group members (balance + successful payment count); administrators additionally get a per-category breakdown of fund movements (پرداخت جریمه، موجودی اولیه، اصلاح دستی، هزینه، بازپرداخت).
+
+# 1.3.2
+
+- Added `/addobserved` (alias `/ثبتهمه`) for group administrators: registers every user the bot has seen writing in that group as a member in one shot, since Bale exposes no API to list group members.
+
+# 1.3.1
+
+- Added `/fineall <amount>` (aliases `/chargeall`, `جریمه همه ۵۰۰۰۰`, `همه جریمه`) for group administrators to add the given amount (in tomans) to every active member of the group at once — e.g. a shared monthly AI subscription.
+- Open invoices of affected members are expired so new bills reflect the updated debt.
+- Persian and Arabic-Indic digits and thousand separators are accepted in the amount.
+- Admin help and README updated.
+
+# 1.3.0
+
+- Added two-group support: the first group the bot joins becomes «گروه اصلی» and the second one «گروه تست»; additional groups are rejected and removing the bot frees the slot.
+- Group registration is now automatic — `Bale:AllowedGroupChatIds` is only used once to seed legacy data.
+- Members, debts, fund ledger, and payments are stored per group; the same Bale user in two groups is two independent members.
+- Admin bot commands are now authorized for the administrators of the same group (via `getChatAdministrators`, cached for 5 minutes); `Bale:AdminUserIds` still works as a global super-admin list.
+- Added a group selector to the admin panel and `GET /api/admin/groups`; group-scoped queries and mutations accept `groupId`.
+- Payments and announcements now belong to the group whose debt they settle.
+- Restored the missing `Data/JsonStore.cs` storage service with atomic writes, a `.bak` backup, and a one-time migration of existing single-group state files.
+
 # 1.2.1
 
 - Added `/fine200` for administrators to register a fixed 200,000-toman penalty by replying to a member message.

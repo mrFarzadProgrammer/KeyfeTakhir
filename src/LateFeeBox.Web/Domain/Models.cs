@@ -16,6 +16,7 @@ public sealed class AppState
     public List<DebtLedgerEntry> DebtEntries { get; set; } = [];
     public List<FundLedgerEntry> FundEntries { get; set; } = [];
     public List<PaymentRequest> Payments { get; set; } = [];
+    public List<GroupInfo> Groups { get; set; } = [];
     public Dictionary<long, ObservedBaleUser> ObservedUsers { get; set; } = [];
     public long LastProcessedUpdateId { get; set; } = -1;
 }
@@ -29,10 +30,20 @@ public sealed class AdminUser
     public DateTime? LastLoginAt { get; set; }
 }
 
+public sealed class GroupInfo
+{
+    public long ChatId { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public bool IsActive { get; set; } = true;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public sealed class TeamMember
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public string DisplayName { get; set; } = string.Empty;
+    public long GroupChatId { get; set; }
     public long? BaleUserId { get; set; }
     public string? BaleUsername { get; set; }
     public bool IsActive { get; set; } = true;
@@ -44,6 +55,7 @@ public sealed class DebtLedgerEntry
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid TeamMemberId { get; set; }
+    public long GroupChatId { get; set; }
     public long AmountRials { get; set; }
     public DebtEntryKind Kind { get; set; }
     public string Description { get; set; } = string.Empty;
@@ -55,6 +67,7 @@ public sealed class DebtLedgerEntry
 public sealed class FundLedgerEntry
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public long GroupChatId { get; set; }
     public long AmountRials { get; set; }
     public FundEntryKind Kind { get; set; }
     public string Description { get; set; } = string.Empty;

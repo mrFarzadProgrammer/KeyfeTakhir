@@ -15,7 +15,7 @@ obj/
 .vscode/
 
 # Runtime data
-data/
+/data/
 backups/
 logs/
 *.log
