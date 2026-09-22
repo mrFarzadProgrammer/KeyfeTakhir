@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-IMAGE_TAG="latefeebox-stable:1.3.0"
+IMAGE_TAG="latefeebox-stable:1.3.4"
 COMPOSE_FILE="docker-compose.server.yml"
 ENV_FILE=".env"
 CONTAINER_NAME="late-fee-box"
